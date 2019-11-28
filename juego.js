@@ -4,7 +4,8 @@ var game = new Phaser.Game(w, h, Phaser.CANVAS, 'phaser-game', { preload: preloa
 
 function preload() {
     game.load.image('background', 'assets/game/fondo.png');
-    game.load.spritesheet('player', 'assets/sprites/gnu.png',55 ,80, 27);
+    //game.load.spritesheet('player', 'assets/sprites/gnu.png',55 ,80, 27);
+    game.load.spritesheet('player', 'assets/sprites/animations.png',58,56,12);
 	game.load.spritesheet('ghost', 'assets/sprites/fantasma.png',77 ,73, 9);
     game.load.image('bullet', 'assets/sprites/purple_ball.png');
     game.load.image('menu', 'assets/game/menu2.png');
@@ -25,9 +26,13 @@ var menu;
 
 var bullet_speed;
 var bullet_displacement;
+var bullet_height;
 var stay_on_air;
 var stay_on_floor;
+
 var is_crouched;
+var keep_crouched=false;
+var deltaTime;
 
 var nn_network;
 var nn_trainer;
@@ -54,7 +59,9 @@ function create() {
     game.physics.enable(player);
     player.body.collideWorldBounds = true;
     var run = player.animations.add('run',[1,2,3,4,5,1]);
-    player.animations.play('run', 12, true);
+    player.animations.play('run', 6, true);
+    var anim_crouch = player.animations.add('anim_crouch',[6,7,8,9,10,6]);
+    
 
 	game.physics.enable(ghost);
     ghost.body.collideWorldBounds = true;
@@ -75,7 +82,7 @@ function create() {
     crouch = game.input.keyboard.addKey(Phaser.KeyCode.S);
     
 
-    nn_network =  new synaptic.Architect.Perceptron(2,4,4,2);
+    nn_network =  new synaptic.Architect.Perceptron(3,9,9,3);
     nn_trainer = new synaptic.Trainer(nn_network);
 
     soundJump  = game.add.audio('jump');
@@ -98,8 +105,12 @@ function get_op_from_trainedData(input_param){
     nn_output = nn_network.activate(input_param);
     var on_air=Math.round( nn_output[0]*100 );
     var on_floor=Math.round( nn_output[1]*100 );
-    console.log("Pronostico ","saltar %: "+ on_air + "no saltar %: " + on_floor );
-    return nn_output[0]>=nn_output[1];
+    var on_crouch = Math.round( nn_output[2]*100 );
+    console.log("Pronostico ","saltar %: "+ on_air + "no saltar %: " + on_floor +"agacharse %: "+on_crouch);
+    if(on_air>=on_floor && on_air>on_crouch) return 0 ;
+    else if(on_crouch>=on_air && on_crouch>=on_floor)return 2;
+    else return 1;
+    //return nn_output[0]>=nn_output[1];
 }
 
 function pause(){
@@ -161,30 +172,46 @@ function jump(){
     soundJump.play();
     player.body.velocity.y = -330;
 }
+function agacharse(){
+    keep_crouched = true;
+    player.body.setSize(60, 50, 0, 30);
+    player.animations.play('anim_crouch', 6, true);
+}
 
 
 function update() {
-    if(player.body.onFloor() && crouch.isDown){
-        //player.body.height = 50;
-        //player.position.y+=30;
+    
+    if(auto_mode==false && player.body.onFloor() && crouch.isDown){
         player.body.setSize(60, 50, 0, 30);
+        is_crouched = 1;
+        player.animations.play('anim_crouch', 6, true);
     }
 
     if(!crouch.isDown){
         //player.body.height = 80;
+        is_crouched = 0;
         player.body.setSize(60, 80, 0, 0);
+        player.animations.play('run', 6, true);
     }
 
     bg.tilePosition.x -= 1; //moving background
 
     game.physics.arcade.collide(bullet, player, collisionHandler, null, this);
-
-    stay_on_floor=1;
-    stay_on_air = 0;
+    if(player.body.onFloor() && crouch.isDown){
+        stay_on_floor=0;
+        stay_on_air = 0;
+        is_crouched = 1;
+    }
+    if(player.body.onFloor() && !crouch.isDown){
+        stay_on_floor=1;
+        stay_on_air = 0;
+        is_crouched = 0;
+    }
 
     if(!player.body.onFloor()) {
         stay_on_floor = 0;
         stay_on_air = 1;
+        is_crouched = 0;
     }
 
     bullet_displacement = Math.floor( player.position.x - bullet.position.x );
@@ -199,8 +226,21 @@ function update() {
         bullet.position.x>0       &&
         player.body.onFloor()     ){
 
-        if( get_op_from_trainedData( [bullet_displacement , bullet_speed] )  ){
-            jump();
+        var res = get_op_from_trainedData( [bullet_displacement , bullet_speed,bullet.body.position.y ] );
+        if( res!=1  ){
+            if(res==2){
+                agacharse();
+            }
+            else{
+                jump();
+            }
+        }
+        if(keep_crouched ==true){
+            deltaTime+= game.time.elapsed/1000;
+        }
+        if(deltaTime >= 1){
+            deltaTime = 0;
+            keep_crouched = false;
         }
     }
 
@@ -212,17 +252,16 @@ function update() {
         reset_state_variables();
     }
 
-    if( auto_mode==false      &&
-        bullet.position.x > 0 ){
-
+    if( auto_mode==false && bullet.position.x > 0 ){
+        
         trainingData.push({
-                'input' :  [bullet_displacement , bullet_speed],
-                'output':  [stay_on_air , stay_on_floor]
+                'input' :  [bullet_displacement , bullet_speed, bullet.body.position.y],
+                'output':  [stay_on_air , stay_on_floor, is_crouched]
         });
 
-        console.log("Desplazamiento Bala, Velocidad Bala, Arriba ?, Abajo ?: ",
+        console.log("Desplazamiento Bala, Velocidad Bala, Arriba ?, Abajo ?: Agachado ?:",
             bullet_displacement + " " +bullet_speed + " "+
-            stay_on_air+" "+  stay_on_floor
+            stay_on_air+" "+  stay_on_floor+" "+ is_crouched
         );
     }
 }
@@ -253,3 +292,12 @@ function render () {
     //grafica el body del jugador
     game.debug.body(player);
 }
+/*
+var contenidoDeArchivo = "Hola Mundo!";
+var elem = document.getElementById('descargar');
+
+elem.download = "archivo.txt";
+elem.href = "data:application/octet-stream," 
+                     + encodeURIComponent(contenidoDeArchivo);
+<a id="descargar">descarga</a>
+*/
